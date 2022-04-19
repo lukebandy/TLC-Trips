@@ -1,0 +1,534 @@
+---
+title: "TLC Data Exploration"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r, echo=FALSE, message=FALSE}
+# Libraries
+library(yaml)
+library(readr) # Read in RDS files
+library(dplyr) # Wrangling
+library(tidyr) # Wrangling
+library(lubridate) # Wrangle dates and times
+library(leaflet) # Plot maps
+library(ggplot2) # General plots
+library(hrbrthemes) # Themes
+library(sf) # Geometry wrangling
+library(DT) # Interactive tables
+
+# Read in data
+trips <- read_rds('data_trips.RDS')
+fares <- read_rds('data_fares.RDS')
+zones <- read_rds('data_zones.RDS')
+routes <- read_rds('data_routes.RDS')
+sample <- read_yaml('settings.yaml')$sample
+
+# Pre-filer trips for just known locations
+trips_knownlocations <- trips %>%
+  filter(!is.na(PULocationID), 
+         !is.na(DOLocationID), 
+         PULocationID < 264, 
+         DOLocationID < 264)
+
+# Rmarkdown options
+options(scipen=999)
+knitr::opts_chunk$set(
+  echo=FALSE,
+  message=FALSE
+)
+```
+
+## Explore routes
+
+```{r, echo=FALSE}
+### Heatmap showing distribution of trips between locations
+
+trips %>%
+  # Count occurrences of each route
+  count(PULocationID, DOLocationID) %>% 
+  mutate(n = n / sample) %>%
+  # Remove routes with unknown pickup or dropoff locations
+  filter(!is.na(PULocationID), !is.na(DOLocationID), PULocationID < 262, DOLocationID < 262) %>%
+  # Expand for all locations
+  complete(PULocationID, DOLocationID) %>%
+  mutate(n = replace_na(n, 0)) %>%
+  # Plot
+  ggplot(aes(PULocationID, DOLocationID, fill= n)) + 
+  geom_tile() + 
+  scale_fill_gradient(low="white", high="#F6A21D") +
+  theme(axis.text.x = element_text(angle = 90),
+        panel.background = element_blank()) + 
+  coord_fixed() +
+  guides(fill = guide_colourbar(title = "Trips")) +
+  labs(title="Trips by Pickup and Dropoff Location IDs", x="Pickup Location ID", y = "Dropoff Location ID")
+```
+
+```{r}
+### Map showing popularity of each zone based on number of pickups and dropoffs
+
+# Calculate zone popularity
+zones_heat <- 
+  # Get each zone ID in order of geographic data
+  zones@data %>% 
+  select(LocationID) %>%
+  # Join in opacity
+  left_join(
+    # Calculate pickups and dropoffs for each location
+    full_join(trips %>% 
+                count(PULocationID) %>% 
+                rename(LocationID = 
+                         PULocationID), 
+              trips %>% 
+                count(DOLocationID) %>% 
+                rename(LocationID = 
+                         DOLocationID), by = "LocationID") %>%
+      # Remove unknown locations
+      filter(!is.na(LocationID),
+             LocationID <= 263) %>%
+      # Calculate scaled opacity
+      mutate(n.x = replace_na(n.x, 0),
+             n.y = replace_na(n.y, 0),
+             opacity1 = n.x + n.y,
+             opacity2 = sum(n.x, na.rm=T) + sum(n.y, na.rm=T),
+             opacity3 = opacity1 / opacity2,
+             opacity4 = max(opacity3, na.rm=T),
+             opacity5 = opacity3/opacity4,
+             n.x = n.x / sum(n.x),
+             n.y = n.y / sum(n.y),
+             # Calculate pickup/dropoff ranks
+             pickupRank = dense_rank(desc(n.x)),
+             dropoffRank = dense_rank(desc(n.y))) %>%
+      select(LocationID, pickupRank, dropoffRank, opacity = opacity5), 
+    by = "LocationID") %>%
+  # Replace NA opacity with 0
+  mutate(opacity = replace_na(opacity, 0))
+
+# Visualise
+leaflet() %>% 
+  # Add area shapes
+  addPolygons(data = zones, 
+              color = "#444444", 
+              weight = 1, 
+              smoothFactor = 0.5,
+              opacity = 1.0, 
+              fillOpacity = zones_heat$opacity, 
+              highlightOptions = highlightOptions(color = "white", weight = 2,
+                                                  bringToFront = TRUE),
+              popup = paste0(zones@data$zone, 
+                             "<br>Pickup Rank: ", zones_heat$pickupRank, 
+                             "<br>Dropoff Rank: ", zones_heat$dropoffRank))%>%
+  addProviderTiles(providers$MtbMap)
+```
+
+```{r}
+full_join(trips_knownlocations %>% 
+                count(PULocationID) %>% 
+                rename(LocationID = 
+                         PULocationID), 
+              trips_knownlocations %>% 
+                count(DOLocationID) %>% 
+                rename(LocationID = 
+                         DOLocationID), by = "LocationID") %>%
+  rowwise() %>% 
+  mutate(n = sum(n.x, n.y, na.rm = TRUE) / sample) %>%
+  
+  # Plot
+  ggplot(aes(n)) +
+  stat_bin(colour="black", fill="#F6A21D", bins=10) + 
+  stat_bin(bins=10, geom="text", aes(label=..count..), vjust=-1.5) +
+  labs(title="Locations by Pickups & Dropoffs", x="Pickups & Dropoffs", y = "Locations")
+```
+
+```{r}
+### Heatmap with only the most popular locations to keep things simpler
+
+trips %>%
+  # Get most popular locations (re-use calculation from previous visual)
+  filter(PULocationID %in% top_n(zones_heat, 5, opacity)$LocationID & 
+           DOLocationID %in% top_n(zones_heat, 5, opacity)$LocationID) %>%
+  # Count occurrences of each route
+  count(PULocationID, DOLocationID) %>% 
+  complete(PULocationID, DOLocationID) %>%
+  mutate(n = n / sample,
+         n = replace_na(n, 0)) %>%
+  # Join in zone names
+  left_join(select(zones@data, PULocationID = LocationID, PULocation = zone), by = "PULocationID") %>%
+  left_join(select(zones@data, DOLocationID = LocationID, DOLocation = zone), by = "DOLocationID") %>%
+  # Plot
+  ggplot(aes(PULocation, DOLocation, fill= n)) + 
+  geom_tile() + 
+  scale_fill_gradient(low="white", high="#F6A21D") +
+  theme(axis.text.x = element_text(angle = 90),
+        panel.background = element_blank()) + 
+  coord_fixed() +
+  guides(fill = guide_colourbar(title = "Trips")) +
+  labs(title="Trips between Top 5 Locations", x="Pickup Location", y = "Dropoff Location")
+```
+
+```{r}
+### Distribution of trips along routes
+
+trips %>% 
+  # Count occurrences of each trip
+  count(PULocationID, DOLocationID) %>% 
+  mutate(n = n / sample) %>%
+  # Remove trips with unknown pickup or dropoff locations
+  filter(!is.na(PULocationID), !is.na(DOLocationID), PULocationID < 262, DOLocationID < 262) %>%
+  # Plot
+  ggplot(aes(x=n)) + 
+  geom_histogram(bins=100) +
+  labs(title="Route Distribution", x="Trips", y="Routes")
+```
+
+```{r}
+### Popularity of each route
+
+routes_heat <- routes %>%
+  inner_join(
+    trips %>% 
+      # Count occurrences of each trip
+      count(PULocationID, DOLocationID) %>% 
+      # Remove trips with unknown pickup or dropoff locations
+      filter(!is.na(PULocationID), !is.na(DOLocationID), PULocationID < 262, DOLocationID < 262) %>%
+      select(PULocationID, DOLocationID, n),
+    by = c("PULocationID", "DOLocationID")
+  ) %>%
+  # Show most popular routes for performance
+  top_n(2000, n) %>%
+  # Calculate heat
+  mutate(heat = n / max(n))
+
+# Visualise
+leaflet() %>%
+  addProviderTiles(providers$MtbMap) %>% 
+  # Route
+  addPolylines(data = routes_heat$geometry, 
+               opacity = routes_heat$heat * 0.5, # Adjust scale of heat
+               weight = 2,
+               color = "#F6A21D") %>% 
+  # Area shapes
+  addPolygons(data = zones, 
+              color = "#444444", 
+              weight = 1, 
+              smoothFactor = 0.2,
+              opacity = 1.0, 
+              fillOpacity = 0.1, 
+              highlightOptions = highlightOptions(color = "white", weight = 2,
+                                                  bringToFront = TRUE),
+              popup = zones@data$zone)
+```
+
+```{r}
+tmp <- round(nrow(filter(trips_knownlocations, PULocationID == DOLocationID)) / nrow(trips_knownlocations) *100, 2)
+```
+
+`r tmp`% of trips finish in their starting location
+
+## Explore pickup date/time
+
+```{r}
+### Trips by Month/Year by Vehicle Type
+
+trips %>%
+  # Count trips
+  mutate(pickup_datetime = as_datetime(pickup_datetime),
+         pickup_monthyear = floor_date(pickup_datetime, "month")) %>%
+  count(vehicle, pickup_monthyear) %>%
+  mutate(n = n / sample) %>%
+  # Remove outliers; probably incorrect data
+  filter(year(pickup_monthyear) > 2010,
+         year(pickup_monthyear) < 2090) %>%
+  # Plot
+  ggplot(aes(x=pickup_monthyear, y=n, fill=vehicle)) + 
+  geom_bar(position="stack", stat="identity") +
+  scale_fill_manual(values = c("#974D25", "#9CA383", "#4A5356", "#F6A21D")) + 
+  # Labels
+  labs(title="Trips by Month/Year and Vehicle Type", x="Month/Year", y = "Trips") + 
+  guides(fill=guide_legend(title="Vehicle"))
+```
+
+```{r}
+trips %>%
+  # Calculate average trips per month per vehicle type
+  mutate(pickup_datetime = as_datetime(pickup_datetime),
+         pickup_monthyear = floor_date(pickup_datetime, "month"),
+         pickup_month = month(pickup_datetime, label = TRUE)) %>%
+  group_by(vehicle, pickup_month) %>%
+  summarise(n = n(),
+            months = n_distinct(pickup_monthyear)) %>%
+  mutate(n = (n / sample) / months) %>%
+  # Plot
+  ggplot(aes(x=pickup_month, y=n, fill=vehicle)) + 
+  geom_bar(position="stack", stat="identity") +
+  scale_fill_manual(values = c("#974D25", "#9CA383", "#4A5356", "#F6A21D")) + 
+  labs(title="Average Trips by Month and Vehicle Type", x="Month", y = "Average Trips") + 
+  guides(fill=guide_legend(title="Vehicle"))
+```
+
+
+```{r}
+### Trips by day of week
+
+# Calculate days per day of week
+days <- data.frame(date = seq(as.Date(min(trips$pickup_datetime)), 
+                              by = "day", 
+                              length.out = as.Date(max(trips$pickup_datetime)) - as.Date(min(trips$pickup_datetime)))) %>%
+  mutate(wday = wday(date, label = TRUE)) %>%
+  count(wday)
+
+trips %>%
+  # Calculate average trips per day of week
+  select(vehicle, pickup_datetime) %>%
+  mutate(pickup_wday = wday(pickup_datetime, label = TRUE)) %>%
+  count(vehicle, pickup_wday) %>%
+  left_join(days, by = c('pickup_wday' = 'wday')) %>%
+  mutate(n = (n.x / n.y) / sample) %>%
+  # Plot
+  ggplot(aes(x=pickup_wday, y=n, fill=vehicle)) + 
+  geom_bar(position="stack", stat="identity") +
+  scale_fill_manual(values = c("#974D25", "#9CA383", "#4A5356", "#F6A21D")) + 
+  labs(title="Average Trips by Day of Week and Vehicle Type", x="Day of Week", y = "Average Trips") + 
+  guides(fill=guide_legend(title="Vehicle"))
+```
+
+```{r}
+### Trips by time of day
+
+trips %>%
+  # Count how many trips for every half an hour
+  mutate(pickup_datetime = as_datetime(pickup_datetime),
+         pickup_datetime.hour = as.POSIXlt(pickup_datetime)$hour + as.POSIXlt(pickup_datetime)$min/60 + as.POSIXlt(pickup_datetime)$sec/3600,
+         pickup_datetime.hour = round(pickup_datetime.hour / 0.5) * 0.5,
+         pickup_datetime.hour = replace(pickup_datetime.hour, pickup_datetime.hour == 24, 0)) %>%
+  count(pickup_datetime.hour) %>%
+  mutate(n = (n / sample) / as.numeric(as.Date(max(trips$pickup_datetime)) - as.Date(min(trips$pickup_datetime)))) %>%
+  # Plot
+  ggplot(aes(x=pickup_datetime.hour, y=n, ymin=0)) +
+  geom_line()+
+  geom_point() +
+  labs(title="Average Trips by Time of Day", x="Hour", y = "Average Trips")
+```
+
+```{r}
+### Trips by time of day and vehicle
+
+trips %>%
+  # Count how many trips for every half an hour
+  mutate(pickup_datetime = as_datetime(pickup_datetime),
+         pickup_datetime.hour = as.POSIXlt(pickup_datetime)$hour + as.POSIXlt(pickup_datetime)$min/60 + as.POSIXlt(pickup_datetime)$sec/3600,
+         pickup_datetime.hour = round(pickup_datetime.hour / 0.5) * 0.5,
+         pickup_datetime.hour = replace(pickup_datetime.hour, pickup_datetime.hour == 24, 0)) %>%
+  count(pickup_datetime.hour, vehicle) %>%
+  mutate(n = (n / sample) / as.numeric(as.Date(max(trips$pickup_datetime)) - as.Date(min(trips$pickup_datetime)))) %>%
+  # Plot
+  ggplot(aes(x=pickup_datetime.hour, y=n, ymin=0, color=vehicle)) +
+  geom_line()+
+  geom_point() +
+  scale_color_manual(values = c("#974D25", "#9CA383", "#4A5356", "#F6A21D")) + 
+  labs(title="Trips by Time", x="Hour", y = "Trips")
+```
+
+```{r}
+### Trips by time of day and vehicle
+
+trips %>%
+  # Count how many trips for every half an hour
+  mutate(pickup_datetime = as_datetime(pickup_datetime),
+         pickup_datetime.hour = as.POSIXlt(pickup_datetime)$hour + as.POSIXlt(pickup_datetime)$min/60 + as.POSIXlt(pickup_datetime)$sec/3600,
+         pickup_datetime.hour = round(pickup_datetime.hour / 1) * 1,
+         pickup_datetime.hour = replace(pickup_datetime.hour, pickup_datetime.hour == 24, 0)) %>%
+  count(vehicle, pickup_datetime.hour) %>%
+  # Plot
+  ggplot(aes(x=pickup_datetime.hour, y=n, fill=vehicle)) + 
+  geom_bar(position="fill", stat="identity") +
+  labs(title="Trips % by Hour and Vehicle Type", x="Hour", y = "Trips %") + 
+  guides(fill=guide_legend(title="Vehicle"))
+```
+
+## Speed
+
+```{r}
+trips_knownlocations %>%
+  
+  # Calculate average trip time per route
+  mutate(duration = dropoff_datetime - pickup_datetime,
+         duration = as.numeric(duration)) %>%
+  group_by(PULocationID, DOLocationID) %>%
+  summarise(duration_average = mean(duration, na.rm = TRUE),
+            trips = n()) %>%
+  ungroup() %>%
+  
+  # Remove average times with low number of trips
+  #filter(trips >= 5) %>% 
+  
+  # Calculate average trip speed 
+  inner_join(routes %>% 
+                  select(PULocationID, DOLocationID, distance = distance_m) %>% 
+                  st_drop_geometry(), 
+                by = c("PULocationID", "DOLocationID")) %>%
+  mutate(distance = distance / 1000,
+         speed_average = distance / ((duration_average / 60) / 60),
+         speed_average = round(speed_average, 2),
+         trips = trips / sample) %>%
+  arrange(speed_average) %>%
+  
+  # Join in zone names
+  left_join(select(zones@data, PULocationID = LocationID, PULocation = zone), by = "PULocationID") %>%
+  left_join(select(zones@data, DOLocationID = LocationID, DOLocation = zone), by = "DOLocationID") %>%
+  
+  # Output
+  select(PULocation, DOLocation, trips, speed_average) %>%
+  datatable()
+```
+
+
+```{r}
+trips_knownlocations %>%
+  
+  # Calculate average trip time per route
+  mutate(duration = dropoff_datetime - pickup_datetime,
+         duration = as.numeric(duration)) %>%
+  group_by(PULocationID, DOLocationID) %>%
+  summarise(duration_average = mean(duration, na.rm = TRUE),
+            trips = n()) %>%
+  
+  # Remove average times with low number of trips
+  filter(trips >= 5) %>% 
+  
+  # Calculate average trip speed 
+  inner_join(routes %>% 
+                  select(PULocationID, DOLocationID, distance = distance_m) %>% 
+                  st_drop_geometry(), 
+                by = c("PULocationID", "DOLocationID")) %>%
+  mutate(distance = distance / 1000,
+         speed_average = distance / ((duration_average / 60) / 60)) %>%
+  
+  # Plot
+  ggplot(aes(speed_average)) +
+  geom_histogram(colour="black", fill="#F6A21D") +
+  labs(title="Routes by Average Speed", x="Average Speed (km/h)", y = "Routes")
+```
+
+```{r}
+trips_knownlocations %>%
+  
+  # Calculate average trip time per route per month
+  mutate(pickup_datetime = as_datetime(pickup_datetime),
+         pickup_monthyear = floor_date(pickup_datetime, "month"),
+         duration = dropoff_datetime - pickup_datetime,
+         duration = as.numeric(duration)) %>%
+  group_by(pickup_monthyear, PULocationID, DOLocationID) %>%
+  summarise(duration_average = mean(duration, na.rm = TRUE),
+            trips = n()) %>%
+  
+  # Remove average times with low number of trips
+  filter(trips > 1) %>% 
+  
+  # Calculate route name
+  left_join(select(zones@data, PULocationID = LocationID, PULocation = zone), by = "PULocationID") %>%
+  left_join(select(zones@data, DOLocationID = LocationID, DOLocation = zone), by = "DOLocationID") %>%
+  mutate(route = paste(PULocation, '-', DOLocation)) %>%
+  
+  # Calculate average trip speed 
+  inner_join(routes %>% 
+                  select(PULocationID, DOLocationID, distance = distance_m) %>% 
+                  st_drop_geometry(), 
+                by = c("PULocationID", "DOLocationID")) %>%
+  mutate(distance = distance / 1000,
+         speed_average = distance / ((duration_average / 60) / 60),
+         trips = trips / sample) %>%
+  
+  # Popular routes to keep things simple
+  filter(route %in% c('Upper East Side North - Upper East Side South',
+                      'Upper East Side South - Midtown Center')) %>%
+  
+  # Plot
+  ggplot(aes(x=pickup_monthyear, y=speed_average, group=route, color=route, size=trips)) + 
+  geom_line(size = 0.5) +
+  geom_point() +
+  labs(title="Average Speed by Month/Year and Route", x="Month/Year", y = "Average Speed (km/h)") + 
+  guides(color=guide_legend(title="Route"),
+         size=guide_legend(title="Trips"))
+```
+
+## Fares
+
+```{r}
+### Distriution of Payment Method
+fares %>% 
+  mutate(total = sum(value)) %>%
+  group_by(name) %>% 
+  summarise(value = sum(value),
+            total = first(total)) %>%
+  mutate(value = value / total) %>%
+  # Plot
+  ggplot(aes(x=factor(1), y=value, fill=name)) + 
+  geom_bar(width = 1, stat = "identity") +
+  coord_polar("y") + 
+  # Polish
+  theme_minimal()+
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    panel.border = element_blank(),
+    panel.grid = element_blank(),
+    axis.ticks = element_blank(),
+    axis.text = element_blank()
+  ) +
+  scale_fill_brewer("Fare Breakdown", palette = "Dark2")
+```
+
+
+```{r, warning=FALSE}
+### Distribution of Trip Fares by Payment Method
+
+# Bring in payment types
+d <- trips %>% 
+  filter(!is.na(total_amount),
+         payment_description %in% c("Cash", "Credit card"))
+
+# Box plots with outliers removed
+ggplot(d, aes(x=payment_description, y=total_amount, color=payment_description)) + 
+  geom_boxplot(outlier.shape = NA, varwidth=T) +
+  scale_y_continuous(limits = quantile(d$total_amount, c(0.1, 0.9))) +
+  labs(title="Distribution of Trip Fares by Payment Method (Outliers removed)", x="Payment Method", y = "Trip Fare")+ 
+  theme(legend.position = "none") +
+  scale_color_manual(values = c("#974D25", "#9CA383"))
+```
+
+## Passengers
+
+```{r}
+trips %>% 
+  count(passenger_count, vehicle) %>%
+  filter(!is.na(passenger_count)) %>%
+  mutate(n = n / sample) %>%
+  # Plot
+  ggplot(aes(x=passenger_count, y=n, fill=vehicle)) + 
+  geom_bar(position="stack", stat="identity") +
+  labs(title="Trips by Passenger Count and Vehicle", x="Passengers", y = "Trips") + 
+  guides(fill=guide_legend(title="Vehicle"))
+```
+
+```{r}
+trips %>%
+  filter(!is.na(passenger_count)) %>%
+  ggplot(aes(x=passenger_count, y=vehicle, fill=vehicle)) + 
+  geom_violin(trim=FALSE) + 
+  coord_flip()+
+  labs(title="Trip Distribution by Passenger Count and Vehicle", x="Passenger Count", y = "Vehicle") +
+  theme(legend.position = "none")
+```
+
+```{r}
+trips %>%
+  filter(!is.na(passenger_count)) %>%
+  ggplot(aes(x=passenger_count, y=vehicle, fill=vehicle)) +
+  geom_boxplot() +
+  labs(title="Trips by Passenger Count and Vehicle", x="Passenger Count", y = "Vehicle") + 
+  theme(legend.position = "none")
+```
+
