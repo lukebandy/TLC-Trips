@@ -22,10 +22,13 @@ options(scipen=999)
 trips_full <- read_rds('data_trips.RDS') %>%
   # Remove extreme outliers
   filter(year(pickup_datetime) > 2010,
-         year(dropoff_datetime) < 2049) %>%
+         year(pickup_datetime) < 2025) %>%
+  # Replace dropoffs that are before pickups with MA
+  mutate(dropoff_datetime = if_else(dropoff_datetime < pickup_datetime, NA_POSIXct_, dropoff_datetime)) %>%
   # Convert datetimes to dates
   mutate(pickup_date = as.Date(pickup_datetime),
          dropoff_date = as.Date(dropoff_datetime))
+
 
 fares_full <- read_rds('data_fares.RDS') %>% 
   filter(id %in% trips_full$id)
@@ -283,7 +286,7 @@ server <- function(input, output) {
   output$infoboxLength <- renderInfoBox({
     infoBox(
       "Average trip length", 
-      paste0(round(as.numeric(mean(trips()$dropoff_datetime - trips()$pickup_datetime)) / 60), " minutes"), 
+      paste0(round(as.numeric(mean(trips()$dropoff_datetime - trips()$pickup_datetime, na.rm=TRUE)) / 60), " minutes"), 
       icon = icon("clock"),
       color = "yellow"
     )

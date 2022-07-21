@@ -39,7 +39,6 @@ zones@data$LocationID = 1:263
 # Ask Google API for directions between each area
 routes <- data.frame()
 for (pickup in 1:263) {
-  message(pickup)
   for (dropoff in 1:263) {
     # Don't get route if going nowhere, or if found in a previous run
     if (pickup != dropoff & 
